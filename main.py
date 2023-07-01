@@ -1,15 +1,13 @@
-#%%
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Literal
 from dataclasses import dataclass
 import time
 import requests
 from requests.models import PreparedRequest
 from bs4 import BeautifulSoup
 import numpy as np
-from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from janome.analyzer import Analyzer
-from janome.tokenfilter import CompoundNounFilter, POSStopFilter
+from janome.tokenfilter import CompoundNounFilter, POSStopFilter, POSKeepFilter
 from janome.charfilter import UnicodeNormalizeCharFilter, RegexReplaceCharFilter
 import pickle
 from pprint import pprint
@@ -21,20 +19,21 @@ class Document:
     text: str
 
     def __init__(self, keyword: str):
-        self.keyword = keyword
-        # self.text = self.get_googled(keyword)
+        self.raw_keyword = keyword
+        self.keyword = self._preprocess_text(self.raw_keyword)
+        # self.text = self.get_googled_text(keyword)
         self.text = self.get_wikipedia_article_text(self.keyword)
 
     @classmethod
-    def get_googled(cls, keywords: str) -> str:
+    def get_googled_text(cls, keywords: str) -> str:
         time.sleep(0.2)
         params = {
-            'q': keywords,
+            "q": keywords,
             # 'hl': 'ja', # 表示言語
             # 'lr': 'lang_ja', # 検索言語
-            'num': 99, # 1ページあたり検索結果件数
-            'filter': 1, # 類似ページの除外ON
-            'pwd': False # パーソナライズ検索の無効化
+            "num": 99,  # 1ページあたり検索結果件数
+            "filter": 1,  # 類似ページの除外ON
+            "pwd": False,  # パーソナライズ検索の無効化
         }
         url = cls.unparse_url("https://www.google.com/search", params)
         print(url)
@@ -45,9 +44,9 @@ class Document:
     @classmethod
     def get_wikipedia_article_text(cls, keyword: str) -> str:
         time.sleep(0.2)
-        article_ja = cls.get_wikipedia_article_by_country(keyword, 'ja')
+        article_ja = cls.get_wikipedia_article_by_country(keyword, "ja")
         if not article_ja:
-            article_en = cls.get_wikipedia_article_by_country(keyword, 'en')
+            article_en = cls.get_wikipedia_article_by_country(keyword, "en")
             if not article_en:
                 raise ValueError("No wikipedia article found.")
             else:
@@ -61,19 +60,21 @@ class Document:
         return text
 
     @classmethod
-    def get_wikipedia_article_by_country(cls, keyword: str, country_code: str):
+    def get_wikipedia_article_by_country(cls, keyword: str, country_code: Literal["ja", "en"]):
         time.sleep(0.2)
         params = {
-            'q': keyword,
-            'limit': 1,
+            "q": keyword,
+            "limit": 1,
         }
-        url = cls.unparse_url(f"https://{country_code}.wikipedia.org/w/rest.php/v1/search/page", params)
-        print(url)
+        url = cls.unparse_url(
+            f"https://{country_code}.wikipedia.org/w/rest.php/v1/search/page", params
+        )
+        # print(url)
         response = requests.get(url).json()
-        if response.get('pages'):
-            article_id = response['pages'][0]['id']
+        if response.get("pages"):
+            article_id = response["pages"][0]["id"]
             params = {
-                'curid': article_id,
+                "curid": article_id,
             }
             url = cls.unparse_url("https://ja.wikipedia.org/w/index.php", params)
             return url
@@ -82,18 +83,18 @@ class Document:
 
     @staticmethod
     def _preprocess_text(text: str) -> str:
-        """NFKC標準化、分かち書き、ストップワード除去
-        """
+        """NFKC標準化、分かち書き、ストップワード除去"""
         char_filters = [
             UnicodeNormalizeCharFilter(),
-            RegexReplaceCharFilter(r'\d+', '0') # 数字を全て0に置換
+            RegexReplaceCharFilter(r"\d+", "0"),  # 数字を全て0に置換
         ]
         token_filters = [
             CompoundNounFilter(),
-            POSStopFilter(['記号','助詞','助動詞'])
+            # POSStopFilter(["記号", "助詞", "助動詞"])
+            POSKeepFilter(["名詞", "動詞", "形容詞", "副詞"])
         ]
         analyzer = Analyzer(char_filters=char_filters, token_filters=token_filters)
-        tokens=analyzer.analyze(text)
+        tokens = analyzer.analyze(text)
         processed_text = " ".join([t.surface for t in tokens])
         return processed_text
 
@@ -106,8 +107,9 @@ class Document:
     @staticmethod
     def _get_page_contents(url: str) -> str:
         response = requests.get(url)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        soup = BeautifulSoup(response.text, "html.parser")
         return soup.text
+
 
 @dataclass
 class Documents:
@@ -126,6 +128,7 @@ class Documents:
 
     def save(self, path: str):
         import pickle
+
         with open(path, "wb") as f:
             pickle.dump(self.googled_docs, f)
 
@@ -157,7 +160,7 @@ class Documents:
     def list_keywords(self) -> List[str]:
         return [doc.keyword for doc in self.googled_docs]
 
-    def get_document(self, keyword: str = None, text:str = None):
+    def get_document(self, keyword: str = None, text: str = None):
         if keyword is None and text is None:
             raise ValueError("Either `keyword` or `text` must be specified.")
         elif keyword:
@@ -170,8 +173,7 @@ class SearchEngine_BM25:
     def __init__(self, b=0.75, k1=1.2):
         self.vectorizer = TfidfVectorizer(
             smooth_idf=False,
-            max_df=0.9,
-            token_pattern=u'(?u)\\b\\w+\\b',
+            max_df=0.8,
         )
         self.b = b
         self.k1 = k1
@@ -185,7 +187,6 @@ class SearchEngine_BM25:
         self.doc_term_matrix = self.vectorizer.transform(self.docs.list_texts())
         self.average_document_length = self.doc_term_matrix.sum(1).mean()
 
-
     def error_before_fit(func):
         def wrapper(self, *args, **kwargs):
             if self.doc_term_matrix is None:
@@ -195,22 +196,23 @@ class SearchEngine_BM25:
 
     @error_before_fit
     def transform(self, query: str):
-        """クエリqとdocs間のBM25を計算"""
+        """クエリと文書間のBM25指標を計算"""
         b, k1 = self.b, self.k1
 
-        # docs内のクエリ単語の出現頻度を取得
-        q: sparse.csr_matrix = self.vectorizer.transform([query])
-        f: sparse.csc_matrix = self.doc_term_matrix.tocsc()[:, q.indices]
+        # クエリ単語のTFIDF
+        q = self.vectorizer.transform([query])
+        f = self.doc_term_matrix.tocsc()[:, q.indices]
 
-        # 各文書の相対文書長を取得
+        # 相対文書長
         doc_length = self.doc_term_matrix.sum(1).A1
         relative_doc_length = doc_length / self.average_document_length
 
-        # bm25計算
-        denom = f + (k1 * (1-b + b*relative_doc_length))[:, None]
-        idf = self.vectorizer._tfidf.idf_[None, q.indices] - 1.
+        # bm25式
+        denom = f + (k1 * (1 - b + b * relative_doc_length))[:, None]
+        idf = self.vectorizer._tfidf.idf_[None, q.indices] - 1.0
         numer = f.multiply(np.broadcast_to(idf, f.shape)) * (k1 + 1)
-        return (numer / denom).sum(1).A1
+        bm25 = (numer / denom).sum(1).A1
+        return bm25
 
     @error_before_fit
     def rank_document(self, query, n: int = 10) -> List[Tuple[float, Document]]:
@@ -219,19 +221,18 @@ class SearchEngine_BM25:
         return res[:n]
 
     @error_before_fit
-    def get_important_features(self, query: str, doc: Document, weight_threshold: float = 2.0):
-        query_mtx: sparse.csr_matrix = self.vectorizer.transform([query])
-        doc_mtx: sparse.csr_matrix = self.vectorizer.transform([doc.text])
+    def get_shared_word_importances(self, query: str, doc: Document, max_results: int = 10):
+        """クエリと文書の両方に出現する単語とTFIDF値の大きい順に返す"""
+        query_mtx = self.vectorizer.transform([query]).toarray().flatten()
+        doc_mtx = self.vectorizer.transform([doc.text]).toarray().flatten()
         feats = self.feature_names
 
-        # クエリと文書の両方に出現する単語のみを抽出
-        indices = self.intersect_lists(query_mtx.indices, doc_mtx.indices)
-        res = list(zip(feats[indices], self.vectorizer._tfidf.idf_[indices]))
-
-        # 重みが閾値以上のもののみを抽出し、高い順にソート
-        res = list(filter(lambda x: x[1] > weight_threshold, res))
-        res = sorted(res, key=lambda x: x[1], reverse=True)
-        return res
+        # クエリと文書の両方でTFIDFが非ゼロの要素を足し合わせ降順にソート
+        intersect = np.where((query_mtx!=0) & (doc_mtx!=0), query_mtx+doc_mtx, 0)
+        non_zero_cnt = (intersect > 0).sum()
+        idx = np.argsort(intersect, axis=None)[::-1][:non_zero_cnt]
+        res = list(zip(feats[idx], intersect[idx]))
+        return res[:max_results]
 
     @staticmethod
     def intersect_lists(A, B):
@@ -242,18 +243,22 @@ class SearchEngine_BM25:
         return intersected_list
 
 
-def extract_closest_document_and_reason(query: Document, search_target: Documents):
+def extract_closest_document_and_reason(
+    query: str, search_target: Documents, top_n: int = 5
+):
     # BM25初期化
     bm = SearchEngine_BM25()
     bm.fit(search_target)
+    print("query:", query)
 
+    res = []
     # 類似度が最も高い文書を取得
-    score, closest_doc = bm.rank_document(query.text, 1)[0] # 1番目のタプル
+    for score, closest_doc in bm.rank_document(query, top_n):
+        # クエリとの重要な共通単語を取得
+        important_feats = bm.get_shared_word_importances(query, closest_doc)
+        res.append((closest_doc.keyword, score, important_feats))
 
-    # クエリとの重要な共通単語を取得
-    important_feats = bm.get_important_features(query.text, closest_doc)
-
-    return (closest_doc.keyword, score, important_feats)
+    return res
 
 
 if __name__ == "__main__":
@@ -281,15 +286,51 @@ if __name__ == "__main__":
     # res = extract_closest_document_and_reason(query, documents)
     # pprint(res)
 
-    print("start")
-    documents = Documents([
-        "西瓜",
-        "梨",
-        "桃",
-        "パン",
-        "コカコーラ",
-    ]).load()
-    query = Document("果物")
-    res = extract_closest_document_and_reason(query, documents)
+    # print("start")
+    # # documents = Documents(
+    # #     [
+    # #         "西瓜",
+    # #         "梨",
+    # #         "桃",
+    # #         "パン",
+    # #         "コカコーラ",
+    # #     ]
+    # # ).load()
+    # # documents.save("fruit.pkl")
+    # documents = Documents().load("fruit.pkl")
+    # query = Document("赤い果物")
+    # res = extract_closest_document_and_reason(query.keyword, documents)
 
+    # pprint(res)
+
+    # print("start")
+    # documents = Documents(
+    #     [
+    #         "蓮花",
+    #         "ひまわり",
+    #         "百合",
+    #         "カーネーション",
+    #         "パクチー",
+    #         "きゅうり"
+    #     ]
+    # ).load()
+    # documents.save("vege.pkl")
+    # documents = Documents().load("vege.pkl")
+    # query = Document("花 黄色 太陽")
+    # res = extract_closest_document_and_reason(query.keyword, documents)
+    # pprint(res)
+
+    print("start")
+    documents = Documents(
+        [
+            "眼鏡",
+            "コンタクトレンズ",
+            "万年筆",
+            "鉛筆",
+            "定規",
+            "自転車"
+        ]
+    ).load()
+    query = Document("文房具")
+    res = extract_closest_document_and_reason(query.keyword, documents)
     pprint(res)
