@@ -11,44 +11,55 @@ from janome.tokenfilter import CompoundNounFilter, POSStopFilter, POSKeepFilter
 from janome.charfilter import UnicodeNormalizeCharFilter, RegexReplaceCharFilter
 import pickle
 from pprint import pprint
+from scipy.sparse import spmatrix
 
 
 @dataclass(eq=True)
 class Document:
+    raw_keyword: str
     keyword: str
+    source_url: str
     description: str
 
     def __init__(self, keyword: str):
         self.raw_keyword = keyword
         self.keyword = self._preprocess_text(self.raw_keyword)
-        self.description = self.get_wikipedia_article_text(self.keyword)
+        self.description, self.source_url = self.get_wikipedia_article_text(
+            self.keyword
+        )
 
-    @classmethod
-    def get_wikipedia_article_text(cls, keyword: str) -> str:
-        time.sleep(0.2)
-        article_ja = cls.get_wikipedia_article_by_country(keyword, "ja")
-        if not article_ja:
-            article_en = cls.get_wikipedia_article_by_country(keyword, "en")
-            if not article_en:
-                raise ValueError("No wikipedia article found.")
-            else:
-                url = article_en
-        else:
+    def get_wikipedia_article_text(self, keyword: str) -> Tuple[Optional[str], Optional[str]]:
+        """Wikipediaの記事を取得し、前処理を行う
+        Args:
+            keyword (str): 検索キーワード
+        Returns:
+            str: 前処理済みの記事本文
+        """
+        article_ja = self.get_wikipedia_article_by_country(keyword, "ja")
+        if article_ja:
             url = article_ja
-
+        else:
+            article_en = self.get_wikipedia_article_by_country(keyword, "en")
+            if article_en:
+                url = article_en
+            else:
+                # raise ValueError("No wikipedia article found.")
+                print(f"Warning: No wikipedia article found for '{keyword}'")
+                return None, None
         print(url)
-        text = cls._get_page_contents(url)
-        text = cls._preprocess_text(text)
-        return text
+        text = self._get_page_contents(url)
+        text = self._preprocess_text(text)
+        return text, url
 
-    @classmethod
-    def get_wikipedia_article_by_country(cls, keyword: str, country_code: Literal["ja", "en"]):
+    def get_wikipedia_article_by_country(
+        self, keyword: str, country_code: Literal["ja", "en"]
+    ):
         time.sleep(0.2)
         params = {
             "q": keyword,
             "limit": 1,
         }
-        url = cls.unparse_url(
+        url = self.unparse_url(
             f"https://{country_code}.wikipedia.org/w/rest.php/v1/search/page", params
         )
         # print(url)
@@ -58,7 +69,7 @@ class Document:
             params = {
                 "curid": article_id,
             }
-            url = cls.unparse_url("https://ja.wikipedia.org/w/index.php", params)
+            url = self.unparse_url("https://ja.wikipedia.org/w/index.php", params)
             return url
         else:
             return None
@@ -70,10 +81,7 @@ class Document:
             UnicodeNormalizeCharFilter(),
             RegexReplaceCharFilter(r"\d+", "0"),  # 数字を全て0に置換
         ]
-        token_filters = [
-            CompoundNounFilter(),
-            POSKeepFilter(["名詞", "動詞", "形容詞", "副詞"])
-        ]
+        token_filters = [CompoundNounFilter(), POSKeepFilter(["名詞", "動詞", "形容詞", "副詞"])]
         analyzer = Analyzer(char_filters=char_filters, token_filters=token_filters)
         tokens = analyzer.analyze(text)
         processed_text = " ".join([t.surface for t in tokens])
@@ -141,14 +149,6 @@ class Documents:
     def list_keywords(self) -> List[str]:
         return [doc.keyword for doc in self.docs]
 
-    def get_document(self, keyword: str = None, text: str = None):
-        if keyword is None and text is None:
-            raise ValueError("Either `keyword` or `text` must be specified.")
-        elif keyword:
-            return [doc for doc in self.docs if doc.keyword == keyword][0]
-        else:
-            return [doc for doc in self.docs if doc.description == text][0]
-
 
 class SearchEngine_BM25:
     def __init__(self, b=0.75, k1=1.2):
@@ -160,10 +160,13 @@ class SearchEngine_BM25:
         self.k1 = k1
 
     def fit(self, docs: Documents):
+        """文書の集合をもとにTFIDF行列作成、平均文書長を計算
+        Args:
+            docs (Documents): 文書集合
+        """
         self.docs = docs
         self.vectorizer.fit(self.docs.list_texts())
 
-        # TFIDF行列作成、平均文書長を計算
         self.feature_names = self.vectorizer.get_feature_names_out()
         self.doc_term_matrix = self.vectorizer.transform(self.docs.list_texts())
         self.average_document_length = self.doc_term_matrix.sum(1).mean()
@@ -173,22 +176,35 @@ class SearchEngine_BM25:
             if self.doc_term_matrix is None:
                 raise ValueError("`fit` function must be called beforehand.")
             return func(self, *args, **kwargs)
+
         return wrapper
 
     @error_before_fit
-    def transform(self, query: str):
-        """クエリと文書間のBM25指標を計算"""
+    def transform(self, query: str) -> spmatrix:
+        """クエリと文書間のBM25指標を計算
+        Args:
+            query: クエリ文字列
+        Returns:
+            spmatrix: BM25 shape (num_documents, num_query_words)
+        """
         b, k1 = self.b, self.k1
 
         # クエリ単語のTFIDF
+        # q.shape: (1, num_features)
+        # f.shape: (num_documents, num_query_words)
         q = self.vectorizer.transform([query])
         f = self.doc_term_matrix.tocsc()[:, q.indices]
 
         # 相対文書長
+        # relative_doc_length.shape: (num_documents,)
         doc_length = self.doc_term_matrix.sum(1).A1
         relative_doc_length = doc_length / self.average_document_length
 
         # bm25式
+        # denom.shape: (num_documents, num_query_words)
+        # idf.shape: (1, num_query_words)
+        # numer.shape: (num_documents, num_query_words)
+        # bm25.shape: (num_documents,)
         denom = f + (k1 * (1 - b + b * relative_doc_length))[:, None]
         idf = self.vectorizer._tfidf.idf_[None, q.indices] - 1.0
         numer = f.multiply(np.broadcast_to(idf, f.shape)) * (k1 + 1)
@@ -196,28 +212,46 @@ class SearchEngine_BM25:
         return bm25
 
     @error_before_fit
-    def rank_document(self, query, n: int = 10) -> List[Tuple[float, Document]]:
+    def rank_document(
+        self, query: str, max_results: int = 10
+    ) -> List[Tuple[float, Document]]:
+        """クエリと文書の類似度を計算し、類似度の高い順に文書を返す
+        Args:
+            query (str): クエリ文字列
+            max_results (int, optional): 返す文書の数. Defaults to 10.
+        Returns:
+            List[Tuple[float, Document]]: (類似度, 文書)のリスト. 類似度降順にソート済み
+        """
         similarity = self.transform(query)
         res = sorted(zip(similarity, self.docs), key=lambda x: x[0], reverse=True)
-        return res[:n]
+        return res[:max_results]
 
     @error_before_fit
-    def get_shared_word_importances(self, query: str, doc: Document, max_results: int = 10):
-        """クエリと文書の両方に出現する単語とTFIDF値の大きい順に返す"""
+    def get_shared_word_importances(
+        self, query: str, doc: Document, max_results: int = 10
+    ) -> List[Tuple[str, float]]:
+        """クエリと文書の両方に出現する単語とTFIDF値の大きい順に返す
+        Args:
+            query (str): クエリ文字列
+            doc (Document): 文書
+            max_results (int, optional): 返す単語の数. Defaults to 10.
+        Returns:
+            List[Tuple[str, float]]: (共通単語, TFIDF値の和)のリスト. TFIDF値の和の降順にソート済み
+        """
         query_mtx = self.vectorizer.transform([query]).toarray().flatten()
         doc_mtx = self.vectorizer.transform([doc.description]).toarray().flatten()
         feats = self.feature_names
 
         # クエリと文書の両方でTFIDFが非ゼロの要素を足し合わせ降順にソート
-        intersect = np.where((query_mtx!=0) & (doc_mtx!=0), query_mtx+doc_mtx, 0)
+        intersect = np.where((query_mtx != 0) & (doc_mtx != 0), query_mtx + doc_mtx, 0)
         non_zero_cnt = (intersect > 0).sum()
         idx = np.argsort(intersect, axis=None)[::-1][:non_zero_cnt]
         res = list(zip(feats[idx], intersect[idx]))
         return res[:max_results]
 
 
-def extract_closest_document_and_reason(
-    query: str, search_target: Documents, top_n: int = 5
+def extract_closest_document_with_keyword(
+    query: str, search_target: Documents, top_n: int = 10
 ):
     # BM25初期化
     bm = SearchEngine_BM25()
@@ -236,20 +270,8 @@ def extract_closest_document_and_reason(
 
 if __name__ == "__main__":
     print("start")
-    documents = Documents(
-        [
-            "眼鏡",
-            "コンタクトレンズ",
-            "万年筆",
-            "鉛筆",
-            "定規",
-            "自転車"
-        ]
-    ).load()
-    res = extract_closest_document_and_reason(
-        query="文房具",
-        search_target=documents
-    )
+    documents = Documents(["眼鏡", "コンタクトレンズ", "万年筆", "鉛筆", "定規", "自転車"]).load()
+    res = extract_closest_document_with_keyword(query="文房具", search_target=documents)
     pprint(res)
 
     # print("start")
