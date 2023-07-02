@@ -16,30 +16,12 @@ from pprint import pprint
 @dataclass(eq=True)
 class Document:
     keyword: str
-    text: str
+    description: str
 
     def __init__(self, keyword: str):
         self.raw_keyword = keyword
         self.keyword = self._preprocess_text(self.raw_keyword)
-        # self.text = self.get_googled_text(keyword)
-        self.text = self.get_wikipedia_article_text(self.keyword)
-
-    @classmethod
-    def get_googled_text(cls, keywords: str) -> str:
-        time.sleep(0.2)
-        params = {
-            "q": keywords,
-            # 'hl': 'ja', # 表示言語
-            # 'lr': 'lang_ja', # 検索言語
-            "num": 99,  # 1ページあたり検索結果件数
-            "filter": 1,  # 類似ページの除外ON
-            "pwd": False,  # パーソナライズ検索の無効化
-        }
-        url = cls.unparse_url("https://www.google.com/search", params)
-        print(url)
-        text = cls._get_page_contents(url)
-        text = cls._preprocess_text(text)
-        return text
+        self.description = self.get_wikipedia_article_text(self.keyword)
 
     @classmethod
     def get_wikipedia_article_text(cls, keyword: str) -> str:
@@ -83,14 +65,13 @@ class Document:
 
     @staticmethod
     def _preprocess_text(text: str) -> str:
-        """NFKC標準化、分かち書き、ストップワード除去"""
+        """Unicode正規化(NFKC)、分かち書き、ストップワード除去"""
         char_filters = [
             UnicodeNormalizeCharFilter(),
             RegexReplaceCharFilter(r"\d+", "0"),  # 数字を全て0に置換
         ]
         token_filters = [
             CompoundNounFilter(),
-            # POSStopFilter(["記号", "助詞", "助動詞"])
             POSKeepFilter(["名詞", "動詞", "形容詞", "副詞"])
         ]
         analyzer = Analyzer(char_filters=char_filters, token_filters=token_filters)
@@ -113,30 +94,30 @@ class Document:
 
 @dataclass
 class Documents:
-    googled_docs: List[Document]
+    docs: List[Document]
 
     def __init__(self, keywords: List[str] = []):
         assert isinstance(keywords, list), "keywords must be a list of strings."
         self.keywords = keywords
-        self.googled_docs: List[Document] = None
+        self.docs: List[Document] = None
 
     def __iter__(self):
-        yield from self.googled_docs
+        yield from self.docs
 
     def __len__(self):
-        return len(self.googled_docs)
+        return len(self.docs)
 
     def save(self, path: str):
         import pickle
 
         with open(path, "wb") as f:
-            pickle.dump(self.googled_docs, f)
+            pickle.dump(self.docs, f)
 
     def load(self, path: Optional[str] = None):
         if path is None:
-            self.googled_docs: List[Document] = self.get_googled_texts(self.keywords)
+            self.docs: List[Document] = self.get_description_texts(self.keywords)
         else:
-            self.googled_docs: List[Document] = self._load(path)
+            self.docs: List[Document] = self._load(path)
         return self
 
     @staticmethod
@@ -148,25 +129,25 @@ class Documents:
         return data
 
     @staticmethod
-    def get_googled_texts(keywords: List[str]) -> List[Document]:
+    def get_description_texts(keywords: List[str]) -> List[Document]:
         res = []
         for s in keywords:
             res.append(Document(s))
         return res
 
     def list_texts(self) -> List[str]:
-        return [doc.text for doc in self.googled_docs]
+        return [doc.description for doc in self.docs]
 
     def list_keywords(self) -> List[str]:
-        return [doc.keyword for doc in self.googled_docs]
+        return [doc.keyword for doc in self.docs]
 
     def get_document(self, keyword: str = None, text: str = None):
         if keyword is None and text is None:
             raise ValueError("Either `keyword` or `text` must be specified.")
         elif keyword:
-            return [doc for doc in self.googled_docs if doc.keyword == keyword][0]
+            return [doc for doc in self.docs if doc.keyword == keyword][0]
         else:
-            return [doc for doc in self.googled_docs if doc.text == text][0]
+            return [doc for doc in self.docs if doc.description == text][0]
 
 
 class SearchEngine_BM25:
@@ -224,7 +205,7 @@ class SearchEngine_BM25:
     def get_shared_word_importances(self, query: str, doc: Document, max_results: int = 10):
         """クエリと文書の両方に出現する単語とTFIDF値の大きい順に返す"""
         query_mtx = self.vectorizer.transform([query]).toarray().flatten()
-        doc_mtx = self.vectorizer.transform([doc.text]).toarray().flatten()
+        doc_mtx = self.vectorizer.transform([doc.description]).toarray().flatten()
         feats = self.feature_names
 
         # クエリと文書の両方でTFIDFが非ゼロの要素を足し合わせ降順にソート
@@ -233,14 +214,6 @@ class SearchEngine_BM25:
         idx = np.argsort(intersect, axis=None)[::-1][:non_zero_cnt]
         res = list(zip(feats[idx], intersect[idx]))
         return res[:max_results]
-
-    @staticmethod
-    def intersect_lists(A, B):
-        intersected_list = []
-        for item in A:
-            if item in B:
-                intersected_list.append(item)
-        return intersected_list
 
 
 def extract_closest_document_and_reason(
@@ -262,6 +235,23 @@ def extract_closest_document_and_reason(
 
 
 if __name__ == "__main__":
+    print("start")
+    documents = Documents(
+        [
+            "眼鏡",
+            "コンタクトレンズ",
+            "万年筆",
+            "鉛筆",
+            "定規",
+            "自転車"
+        ]
+    ).load()
+    res = extract_closest_document_and_reason(
+        query="文房具",
+        search_target=documents
+    )
+    pprint(res)
+
     # print("start")
     # documents = Documents([
     #     "インターステラ",
@@ -319,18 +309,3 @@ if __name__ == "__main__":
     # query = Document("花 黄色 太陽")
     # res = extract_closest_document_and_reason(query.keyword, documents)
     # pprint(res)
-
-    print("start")
-    documents = Documents(
-        [
-            "眼鏡",
-            "コンタクトレンズ",
-            "万年筆",
-            "鉛筆",
-            "定規",
-            "自転車"
-        ]
-    ).load()
-    query = Document("文房具")
-    res = extract_closest_document_and_reason(query.keyword, documents)
-    pprint(res)
